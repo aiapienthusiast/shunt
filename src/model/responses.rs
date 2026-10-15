@@ -71,6 +71,14 @@ pub struct AnthropicSseMachine {
     text_buffer: String,
     text_citations: Vec<Value>,
     tool_buffer: Option<ToolBuffer>,
+    /// Identity and delta state of the open tool block, tracked apart from
+    /// `tool_buffer` (absent on streaming machines) so the done events can tell
+    /// whether they belong to it and whether their full `arguments` still need
+    /// to reach the client (issue #765).
+    tool_call: OpenToolCall,
+    /// Function calls added while another tool block was still open, in arrival
+    /// order (see [`DeferredCall`]).
+    deferred_calls: Vec<DeferredCall>,
     reasoning: Option<ReasoningBuffer>,
     web_search_indexes: HashMap<String, String>,
     /// Whether the request used the native `tool_search` protocol (issue #82).
@@ -96,6 +104,27 @@ pub struct AnthropicSseMachine {
     /// Responses API has no `stop` parameter (issue #605). Empty — the common
     /// case — leaves every text path byte-identical to before the feature.
     stop: StopScanner,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OpenToolCall {
+    /// The output item's `id`, which `function_call_arguments.done` names as
+    /// `item_id`.
+    item_id: Option<String>,
+    call_id: Option<String>,
+    /// Whether any `input_json_delta` was emitted for this call.
+    args_streamed: bool,
+}
+
+/// A function call the upstream added while another tool block was still open
+/// — parallel calls interleaved as added A, added B, done A, done B. Anthropic
+/// content blocks stream one at a time, so opening B would close A before its
+/// done-event arguments arrive. B and every event naming it wait here instead,
+/// and replay in order once the open call closes (issue #765).
+#[derive(Debug, Clone)]
+struct DeferredCall {
+    item: Value,
+    events: Vec<ResponseEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +167,8 @@ impl AnthropicSseMachine {
             text_buffer: String::new(),
             text_citations: Vec::new(),
             tool_buffer: None,
+            tool_call: OpenToolCall::default(),
+            deferred_calls: Vec::new(),
             reasoning: None,
             web_search_indexes: HashMap::new(),
             tool_search_native,
@@ -195,6 +226,10 @@ impl AnthropicSseMachine {
         if self.stopped {
             return Vec::new();
         }
+        if let Some(index) = self.deferred_call_index(&event) {
+            self.deferred_calls[index].events.push(event);
+            return Vec::new();
+        }
         let name = event.event.as_deref().unwrap_or("");
         match name {
             "response.created" | "response.in_progress" => self.start(&event.data),
@@ -206,7 +241,7 @@ impl AnthropicSseMachine {
             }
             "response.reasoning_summary_text.delta" => self.reasoning_delta(&event.data),
             "response.function_call_arguments.delta" => self.arguments_delta(&event.data),
-            "response.function_call_arguments.done" => self.close_current(BlockKind::Tool),
+            "response.function_call_arguments.done" => self.close_tool(&event.data),
             "response.output_item.done" => self.output_item_done(&event.data),
             // `response.incomplete` is a clean (if truncated) terminal, not a
             // transport cut — mirrors the WebSocket transport's terminal set
@@ -256,6 +291,7 @@ impl AnthropicSseMachine {
             return Vec::new();
         }
         let mut out = self.close_any();
+        out.extend(self.drain_deferred_calls());
         out.extend(self.stop_events("end_turn"));
         out
     }
@@ -343,6 +379,13 @@ impl AnthropicSseMachine {
         let item = data.get("item").unwrap_or(data);
         match item.get("type").and_then(Value::as_str) {
             Some("message") => Vec::new(),
+            Some("function_call") if self.defers_call(item) => {
+                self.deferred_calls.push(DeferredCall {
+                    item: item.clone(),
+                    events: Vec::new(),
+                });
+                Vec::new()
+            }
             Some("function_call") => self.open_tool(item),
             Some("reasoning") => self.reasoning_added(item),
             _ => Vec::new(),
@@ -351,16 +394,29 @@ impl AnthropicSseMachine {
 
     /// `response.output_item.done` closes whichever item just finished. Reasoning
     /// items need special handling (stamp the round-trip signature); function_call
-    /// and message items just close.
+    /// items deliver any `arguments` no delta carried; message items just close.
     fn output_item_done(&mut self, data: &Value) -> Vec<String> {
         let item = data.get("item").unwrap_or(data);
         match item.get("type").and_then(Value::as_str) {
-            Some("reasoning") => self.reasoning_done(item),
+            Some("reasoning") => {
+                let mut out = self.reasoning_done(item);
+                out.extend(self.release_deferred_calls());
+                out
+            }
             Some("web_search_call") => self.web_search_done(item),
             // The native tool_search_call carries its full `arguments` (a JSON
             // object) only at `done` — codex ignores the `added`/delta events too
             // — so the whole ToolSearch tool_use is emitted here in one shot.
             Some("tool_search_call") if self.tool_search_native => self.tool_search_call_done(item),
+            Some("function_call") => self.close_tool(item),
+            // A message ends its own text block only — never a tool block the
+            // deferred calls released — and is where those calls are released:
+            // its `output_text.done` / `content_part.done` still precede it.
+            Some("message") => {
+                let mut out = self.close_current(BlockKind::Text);
+                out.extend(self.release_deferred_calls());
+                out
+            }
             _ => self.close_any(),
         }
     }
@@ -592,6 +648,12 @@ impl AnthropicSseMachine {
             .unwrap_or("")
             .to_string();
         self.saw_tool = true;
+        let identifier = |key| item.get(key).and_then(Value::as_str).map(str::to_string);
+        self.tool_call = OpenToolCall {
+            item_id: identifier("id"),
+            call_id: identifier("call_id"),
+            args_streamed: false,
+        };
         self.tool_buffer = self.accumulate_content.then(|| ToolBuffer {
             id: id.clone(),
             name: name.clone(),
@@ -795,7 +857,21 @@ impl AnthropicSseMachine {
     }
 
     fn arguments_delta(&mut self, data: &Value) -> Vec<String> {
+        // A delta for a call whose block text or reasoning already stopped has
+        // no block left to land on; never stream it onto another block.
+        if self.open.as_ref().map(|block| block.kind) != Some(BlockKind::Tool)
+            || !self.event_names_open_call(data)
+        {
+            return Vec::new();
+        }
         let delta = data.get("delta").and_then(Value::as_str).unwrap_or("");
+        self.emit_arguments(delta)
+    }
+
+    fn emit_arguments(&mut self, delta: &str) -> Vec<String> {
+        if !delta.is_empty() {
+            self.tool_call.args_streamed = true;
+        }
         if self.accumulate_content {
             if let Some(tool) = &mut self.tool_buffer {
                 tool.json.push_str(delta);
@@ -809,6 +885,138 @@ impl AnthropicSseMachine {
                 "delta": {"type": "input_json_delta", "partial_json": delta}
             }),
         )]
+    }
+
+    /// Close the open block at a function call's `function_call_arguments.done`
+    /// or `output_item.done`, both of which carry the call's full `arguments`.
+    /// Upstreams may send the arguments only there, with no preceding delta
+    /// (Codex parallel calls, issue #765), so a tool block that streamed nothing
+    /// gets them as one `input_json_delta` before its `content_block_stop`. A
+    /// block whose deltas already arrived is closed as-is, never sent a second
+    /// copy. A done event naming a different call than the open one (a call
+    /// whose block an interleaved `output_item.added` already closed) is
+    /// ignored, so its arguments never land on another call's `tool_use` and
+    /// the open call still closes on its own done events.
+    fn close_tool(&mut self, data: &Value) -> Vec<String> {
+        if self.open.as_ref().map(|block| block.kind) != Some(BlockKind::Tool) {
+            // Text or reasoning closed this call first. Its done event never
+            // closes that block, and releases the calls deferred behind it once
+            // nothing is open.
+            return self.release_deferred_calls();
+        }
+        if !self.event_names_open_call(data) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if !self.tool_call.args_streamed {
+            if let Some(arguments) = data
+                .get("arguments")
+                .and_then(Value::as_str)
+                .filter(|arguments| !arguments.is_empty())
+            {
+                out.extend(self.emit_arguments(arguments));
+            }
+        }
+        out.extend(self.close_any());
+        out.extend(self.flush_deferred_calls());
+        out
+    }
+
+    /// Whether a function call added now must wait — behind the open tool
+    /// block, or behind calls already deferred, so a later call never overtakes
+    /// an earlier one after text or reasoning closed the open block. Argument
+    /// events name their call only by `item_id`, so a call without an `id`
+    /// cannot have them routed back to it: it opens at once, closing the open
+    /// block as before.
+    fn defers_call(&self, item: &Value) -> bool {
+        (self.open.as_ref().map(|block| block.kind) == Some(BlockKind::Tool)
+            || !self.deferred_calls.is_empty())
+            && item.get("id").and_then(Value::as_str).is_some()
+    }
+
+    /// The deferred call an upstream event names, if any: argument events by
+    /// `item_id`, `output_item.done` by its item's `id` or `call_id`.
+    fn deferred_call_index(&self, event: &ResponseEvent) -> Option<usize> {
+        if self.deferred_calls.is_empty() {
+            return None;
+        }
+        let data = &event.data;
+        let (item_id, call_id) = match event.event.as_deref()? {
+            "response.function_call_arguments.delta" | "response.function_call_arguments.done" => {
+                (data.get("item_id").and_then(Value::as_str), None)
+            }
+            "response.output_item.done" => {
+                let item = data.get("item").unwrap_or(data);
+                if item.get("type").and_then(Value::as_str) != Some("function_call") {
+                    return None;
+                }
+                (
+                    item.get("id").and_then(Value::as_str),
+                    item.get("call_id").and_then(Value::as_str),
+                )
+            }
+            _ => return None,
+        };
+        self.deferred_calls.iter().position(|call| {
+            let names = |key: &str, value: Option<&str>| {
+                value.is_some() && call.item.get(key).and_then(Value::as_str) == value
+            };
+            names("id", item_id) || names("call_id", call_id)
+        })
+    }
+
+    /// Open each deferred call in arrival order and replay its buffered events,
+    /// stopping at the first one still open afterwards — its remaining events
+    /// then arrive live, and the calls behind it stay deferred.
+    fn flush_deferred_calls(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        while self.open.as_ref().map(|block| block.kind) != Some(BlockKind::Tool)
+            && !self.deferred_calls.is_empty()
+        {
+            let call = self.deferred_calls.remove(0);
+            out.extend(self.open_tool(&call.item));
+            for event in call.events {
+                out.extend(self.apply(event));
+            }
+        }
+        out
+    }
+
+    /// Replay the deferred calls once no block at all is open — after the text
+    /// or reasoning item that closed the call they waited behind has finished.
+    /// An open text or reasoning block is never cut short to make room.
+    fn release_deferred_calls(&mut self) -> Vec<String> {
+        if self.open.is_some() {
+            return Vec::new();
+        }
+        self.flush_deferred_calls()
+    }
+
+    /// At a terminal event, emit every call still deferred — the open call may
+    /// never have sent its done events — closing each after its replay.
+    fn drain_deferred_calls(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        while !self.deferred_calls.is_empty() {
+            out.extend(self.flush_deferred_calls());
+            out.extend(self.close_any());
+        }
+        out
+    }
+
+    /// Whether an argument or done event belongs to the open tool call.
+    /// `output_item.done` names the call by its item's `id` and `call_id`, the
+    /// `function_call_arguments` events by `item_id`. An identifier missing on
+    /// either side cannot tell the calls apart, so it counts as a match.
+    fn event_names_open_call(&self, data: &Value) -> bool {
+        let differs = |key: &str, open: &Option<String>| {
+            matches!(
+                (data.get(key).and_then(Value::as_str), open),
+                (Some(event), Some(open)) if event != open
+            )
+        };
+        !differs("call_id", &self.tool_call.call_id)
+            && !differs("item_id", &self.tool_call.item_id)
+            && !differs("id", &self.tool_call.item_id)
     }
 
     fn close_current(&mut self, expected: BlockKind) -> Vec<String> {
@@ -902,6 +1110,7 @@ impl AnthropicSseMachine {
     fn complete(&mut self, data: &Value) -> Vec<String> {
         self.read_usage(data);
         let mut out = self.close_any();
+        out.extend(self.drain_deferred_calls());
         let stop_reason = if self.saw_tool {
             "tool_use"
         } else {
