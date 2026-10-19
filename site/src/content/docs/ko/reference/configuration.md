@@ -231,11 +231,26 @@ jwt_secret = ["new-secret-value", "old-secret-value"]
 
 `[server.gateway]`가 있으면 인증된 `GET /managed/settings`가 등록되고, 순서가 있는 비어 있지 않은 policy 목록은 이 managed document를 제공합니다. 각 policy는 선택적 `[server.gateway.policies.match]`와 필수 open-schema `[server.gateway.policies.cli]` object를 가집니다. `match` 생략, `match = {}`, 또는 `emails` 없음은 catch-all입니다. 명시적으로 빈 `emails` 목록이나 빈 entry는 시작 오류입니다.
 
-모든 catch-all policy를 순서대로 merge한 뒤, 첫 번째 정확한(case-sensitive) email policy를 위에 merge합니다. object는 재귀 merge하고 array는 교체하되, key에 `deny`가 포함된 array는 중복 없는 union으로 합칩니다. 알려진 key는 시작과 hot reload 때 검증합니다. `availableModels`는 string만 담은 array여야 하고, `env`는 string·number·boolean scalar value만 담은 table이어야 합니다. 알려지지 않은 key는 open-schema로 유지하지만, 모든 value는 JSON으로 표현할 수 있어야 하며 non-finite float는 거부됩니다.
+모든 catch-all policy를 순서대로 merge한 뒤, 대소문자를 무시하고 정확히 일치하는 첫 번째 email policy를 위에 merge합니다(`match.emails` 항목과 로그인한 email을 모두 소문자로 바꿔 비교). object는 재귀 merge하고 array는 교체하되, key에 `deny`가 포함된 array는 중복 없는 union으로 합칩니다. 알려진 key는 시작과 hot reload 때 검증합니다. `availableModels`는 string만 담은 array여야 하고, `env`는 string·number·boolean scalar value만 담은 table이어야 합니다. 알려지지 않은 key는 open-schema로 유지하지만, 모든 value는 JSON으로 표현할 수 있어야 하며 non-finite float는 거부됩니다.
 
 `policies`가 없으면 endpoint는 `404`를 반환합니다. policy가 구성됐지만 일치하는 user-specific 또는 catch-all settings가 없으면 telemetry 활성 시 telemetry 전용 `settings.env`를, 비활성 시 `settings: {}`를 담은 `200`을 반환합니다. response에는 `uuid`, `checksum`, checksum을 담은 quoted `ETag`가 있으며, 일치하는 `If-None-Match`에는 `304`를 반환합니다.
 
 해석된 `cli.availableModels`는 gateway JWT request의 `/v1/messages`와 `/v1/messages/count_tokens`에 적용됩니다. top-level `model` 끝의 Claude Code context-window hint(`[1m]` 또는 `[1M]`) 하나를 제거한 뒤 비교하며, 목록에 없으면 `400 invalid_request_error`로 거부합니다. static `[server.auth]` credential은 gateway policy user를 식별하지 않으므로 이 제한을 받지 않습니다.
+
+### `[server.gateway.desktop_bootstrap]` (선택)
+
+디바이스 코드 로그인 뒤 Claude Desktop의 [bootstrap 로그인](/ko/guides/connect-claude-desktop/#bootstrap-로그인-디바이스-코드)이 가져가는 구성 엔드포인트 `GET /user/bootstrap`을 제공합니다. 이 테이블이 없으면 라우트는 `404`를 반환합니다.
+
+| 키 | 기본값 | 의미 |
+| :-- | :-- | :-- |
+| `template` | 필수 | 최상위가 object인 JSON 파일 경로. 설정 로드와 `shunt check` 때 존재하고 파싱되어야 하며, 요청마다 읽으므로 수정 내용은 재시작 없이 적용됩니다. 상대 경로는 설정 파일이 아니라 shunt의 작업 디렉터리를 기준으로 해석됩니다 |
+
+파일은 경로만 가능하고 URL은 지원하지 않습니다. 응답은 템플릿 그대로이며, 문자열 값 안의 `${user.email}`, `${user.sub}`, `${user.name}`만 로그인한 사용자의 값으로 바뀝니다(알 수 없는 `${...}` 토큰과 객체 키는 그대로 둡니다). `[[server.gateway.policies]]`가 없거나, policy의 `match.emails`에 사용자가 포함되거나, catch-all policy가 있으면 그 사용자는 대상이며, 그 외 사용자는 `403`을 받습니다.
+
+```toml
+[server.gateway.desktop_bootstrap]
+template = "/etc/shunt/claude-desktop-bootstrap.json"
+```
 
 ### `[server.gateway.telemetry]` (선택)
 

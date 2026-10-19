@@ -231,11 +231,26 @@ jwt_secret = ["new-secret-value", "old-secret-value"]
 
 存在 `[server.gateway]` 即会注册经过认证的 `GET /managed/settings`;有序且非空的 policy list 为其提供 managed document。每条 policy 都有可选的 `[server.gateway.policies.match]` 和必需的 open-schema `[server.gateway.policies.cli]` object。省略 `match`、使用 `match = {}` 或不设置 `emails` 都表示 catch-all。显式空 `emails` list 或空白 entry 会导致启动错误。
 
-所有 catch-all policy 按顺序 merge,然后在其上 merge 第一个 email 精确匹配(case-sensitive)的 policy。object 递归 merge;array 通常替换,但 key 包含 `deny` 的 array 会做无重复 union。已知 key 会在启动和 hot reload 时验证:`availableModels` 必须是仅包含 string 的 array;`env` 必须是仅包含 string、number 或 boolean scalar value 的 table。未知 key 保持 open-schema,但所有 value 都必须可用 JSON 表示;非有限 float 会被拒绝。
+所有 catch-all policy 按顺序 merge,然后在其上 merge 第一个 email 精确匹配(不区分大小写)的 policy(`match.emails` 各项与登录用户的 email 都会先转为小写再比较)。object 递归 merge;array 通常替换,但 key 包含 `deny` 的 array 会做无重复 union。已知 key 会在启动和 hot reload 时验证:`availableModels` 必须是仅包含 string 的 array;`env` 必须是仅包含 string、number 或 boolean scalar value 的 table。未知 key 保持 open-schema,但所有 value 都必须可用 JSON 表示;非有限 float 会被拒绝。
 
 没有 `policies` 时 endpoint 返回 `404`。已配置 policy 但没有匹配的 user-specific 或 catch-all settings 时,若 telemetry 已启用则返回带有仅 telemetry `settings.env` 的 `200`,否则返回带有 `settings: {}` 的 `200`。response 包含 `uuid`、`checksum` 和保存 checksum 的 quoted `ETag`;匹配的 `If-None-Match` 返回 `304`。
 
 解析后的 `cli.availableModels` 会应用于 gateway JWT request 的 `/v1/messages` 和 `/v1/messages/count_tokens`。比较前会从 top-level `model` 移除一个末尾 Claude Code context-window hint（`[1m]` 或 `[1M]`）;若剩余 model 不在 list 中,则返回 `400 invalid_request_error`。static `[server.auth]` credential 无法标识 gateway policy user,因此不受此限制。
+
+### `[server.gateway.desktop_bootstrap]`(可选)
+
+提供 `GET /user/bootstrap`，即 Claude Desktop 的 [bootstrap 登录](/zh-cn/guides/connect-claude-desktop/#bootstrap-登录设备码)在设备码登录之后获取配置所用的端点。没有此表时该路由返回 `404`。
+
+| 键 | 默认 | 含义 |
+| :-- | :-- | :-- |
+| `template` | 必填 | 顶层为对象的 JSON 文件路径。在配置加载和 `shunt check` 时必须存在且可解析；每次请求都会读取，因此修改无需重启即可生效。相对路径以 shunt 的工作目录（而非配置文件所在目录）为基准解析 |
+
+只能是文件路径，不支持 URL。响应就是模板本身，只有字符串值中的 `${user.email}`、`${user.sub}`、`${user.name}` 会替换为已登录用户的值（未知的 `${...}` 标记和对象键保持原样）。没有 `[[server.gateway.policies]]`、某条 policy 的 `match.emails` 列出该用户，或存在 catch-all policy 时，该用户有权获取；其他用户收到 `403`。
+
+```toml
+[server.gateway.desktop_bootstrap]
+template = "/etc/shunt/claude-desktop-bootstrap.json"
+```
 
 ### `[server.gateway.telemetry]`(可选)
 

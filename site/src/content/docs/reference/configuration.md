@@ -314,11 +314,26 @@ The issued bearer gates `/v1/models` and `/v1/messages`/`/v1/messages/count_toke
 
 Presence of `[server.gateway]` registers authenticated `GET /managed/settings`; an ordered, non-empty policy list supplies its managed document. Each policy has an optional `[server.gateway.policies.match]` table and a required open-schema `[server.gateway.policies.cli]` object. `match` omitted, `match = {}`, or no `emails` means catch-all; an explicit empty `emails` list or blank entry fails startup.
 
-All catch-all policies merge in order, then the first exact, case-sensitive email match merges on top. Objects merge recursively; arrays replace except keys containing `deny`, whose arrays union without duplicates. Known keys are validated at startup and hot reload: `availableModels`, when present, must be an array containing only strings, and `env`, when present, must be a table containing only scalar string, number, or boolean values. Unknown keys remain open-schema, but every value must be JSON-representable; non-finite floats are rejected.
+All catch-all policies merge in order, then the first exact, case-insensitive email match merges on top (`match.emails` entries and the signed-in email are both lowercased before comparison). Objects merge recursively; arrays replace except keys containing `deny`, whose arrays union without duplicates. Known keys are validated at startup and hot reload: `availableModels`, when present, must be an array containing only strings, and `env`, when present, must be a table containing only scalar string, number, or boolean values. Unknown keys remain open-schema, but every value must be JSON-representable; non-finite floats are rejected.
 
 No `policies` key makes the endpoint return `404`. With policies configured but no matching user-specific or catch-all settings, it returns `200` with a telemetry-only `settings.env` when telemetry is enabled, and `settings: {}` otherwise. Responses carry `uuid`, `checksum`, and a quoted `ETag` containing the checksum; matching `If-None-Match` returns `304`.
 
 If the resolved `cli.availableModels` is an array of strings, gateway-JWT requests to `/v1/messages` and `/v1/messages/count_tokens` are rejected with `400 invalid_request_error` when their top-level `model`, after stripping one trailing Claude Code context-window hint (`[1m]` or `[1M]`), is absent from the list. Static `[server.auth]` credentials remain unrestricted because they do not identify a gateway policy user.
+
+### `[server.gateway.desktop_bootstrap]` (optional)
+
+Serves `GET /user/bootstrap`, the configuration endpoint Claude Desktop's [bootstrap sign-in](/guides/connect-claude-desktop/) fetches after the device-code login. Without this table the route returns `404`.
+
+| Key | Default | Meaning |
+| :-- | :-- | :-- |
+| `template` | required | Path to a JSON file whose top level is an object. Must exist and parse at config load and `shunt check`; read on every request, so edits apply without a restart. A relative path resolves against shunt's working directory, not the config file |
+
+The file is a path only, not a URL. The response is the template unchanged, except that `${user.email}`, `${user.sub}`, and `${user.name}` inside string values become the signed-in user's values (unknown `${...}` tokens and object keys are left as-is). A user is entitled when `[[server.gateway.policies]]` is absent, when a policy's `match.emails` lists them, or when a catch-all policy exists; other users get `403`.
+
+```toml
+[server.gateway.desktop_bootstrap]
+template = "/etc/shunt/claude-desktop-bootstrap.json"
+```
 
 ### `[server.gateway.telemetry]` (optional)
 

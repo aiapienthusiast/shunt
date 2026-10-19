@@ -231,11 +231,26 @@ jwt_secret = ["new-secret-value", "old-secret-value"]
 
 `[server.gateway]` が存在すると、認証済み `GET /managed/settings` が登録されます。順序付きの空でない policy list は、その managed document を提供します。各 policy は任意の `[server.gateway.policies.match]` と、必須の open-schema `[server.gateway.policies.cli]` object を持ちます。`match` の省略、`match = {}`、または `emails` なしは catch-all です。明示的な空の `emails` list または空白 entry は起動エラーです。
 
-すべての catch-all policy を順番に merge し、その上に最初の完全一致（case-sensitive）email policy を merge します。object は再帰的に merge し、array は置換します。ただし key に `deny` を含む array は重複なしの union になります。既知の key は起動時と hot reload 時に検証されます。`availableModels` は string のみの array、`env` は string・number・boolean の scalar value のみを含む table でなければなりません。未知の key は open-schema のままですが、すべての value は JSON で表現可能でなければならず、非有限 float は拒否されます。
+すべての catch-all policy を順番に merge し、その上に、大文字小文字を区別せず完全一致した最初の email policy を merge します（`match.emails` の各項目とサインインしたメールアドレスはどちらも小文字にしてから比較します）。object は再帰的に merge し、array は置換します。ただし key に `deny` を含む array は重複なしの union になります。既知の key は起動時と hot reload 時に検証されます。`availableModels` は string のみの array、`env` は string・number・boolean の scalar value のみを含む table でなければなりません。未知の key は open-schema のままですが、すべての value は JSON で表現可能でなければならず、非有限 float は拒否されます。
 
 `policies` がなければ endpoint は `404` を返します。policy が設定されていても user-specific または catch-all settings が一致しない場合、telemetry が有効なら telemetry のみの `settings.env` を、無効なら `settings: {}` を含む `200` を返します。response は `uuid`、`checksum`、checksum を含む quoted `ETag` を持ち、一致する `If-None-Match` には `304` を返します。
 
 解決された `cli.availableModels` は gateway JWT request の `/v1/messages` と `/v1/messages/count_tokens` に適用されます。top-level `model` から末尾の Claude Code context-window hint（`[1m]` または `[1M]`）を 1 つ取り除いてから比較し、list にない場合は `400 invalid_request_error` になります。static `[server.auth]` credential は gateway policy user を識別しないため、この制限の対象外です。
+
+### `[server.gateway.desktop_bootstrap]`（オプション）
+
+デバイスコードログインの後に Claude Desktop の [bootstrap サインイン](/ja/guides/connect-claude-desktop/#bootstrap-サインインデバイスコード)が取得する構成エンドポイント `GET /user/bootstrap` を提供します。このテーブルがなければルートは `404` を返します。
+
+| キー | デフォルト | 意味 |
+| :-- | :-- | :-- |
+| `template` | 必須 | トップレベルがオブジェクトの JSON ファイルへのパス。設定のロードと `shunt check` の時点で存在し、パースできる必要があります。リクエストごとに読み込まれるため、編集は再起動なしで反映されます。相対パスは設定ファイルではなく shunt の作業ディレクトリを基準に解決されます |
+
+指定できるのはパスのみで、URL は使えません。レスポンスはテンプレートそのままで、文字列値の中の `${user.email}`、`${user.sub}`、`${user.name}` だけがサインインしたユーザーの値に置き換わります（未知の `${...}` トークンとオブジェクトのキーはそのままです）。`[[server.gateway.policies]]` がない場合、policy の `match.emails` にユーザーが含まれる場合、または catch-all policy がある場合、そのユーザーは対象です。それ以外のユーザーは `403` を受け取ります。
+
+```toml
+[server.gateway.desktop_bootstrap]
+template = "/etc/shunt/claude-desktop-bootstrap.json"
+```
 
 ### `[server.gateway.telemetry]`（オプション）
 
