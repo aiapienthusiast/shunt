@@ -8,6 +8,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use super::meter::{Assessment, SpendMeter};
+
 /// Largest supported amount in USD cents. The next enforcement stage uses
 /// unsigned 64-bit arithmetic, and this bound keeps the wire value at 19 digits.
 pub(crate) const MAX_AMOUNT: u64 = 9_999_999_999_999_999_999;
@@ -43,7 +45,7 @@ pub enum Scope {
     Organization,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Period {
     Daily,
@@ -130,6 +132,7 @@ pub struct SpendStore {
     /// memory may be behind the store. Cleared by the next mutation's resync.
     needs_resync: AtomicBool,
     state_path: Option<PathBuf>,
+    meter: SpendMeter,
 }
 
 impl SpendStore {
@@ -142,7 +145,25 @@ impl SpendStore {
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
             needs_resync: AtomicBool::new(false),
             state_path,
+            meter: SpendMeter::default(),
         }
+    }
+
+    /// The process-lifetime spend counters, kept off `SpendState` so the
+    /// request path never clones the limit tables.
+    pub fn meter(&self) -> &SpendMeter {
+        &self.meter
+    }
+
+    /// Checks `principal` against the stored caps at `now_secs` (Unix
+    /// seconds), returning the verdict plus the binding cap from one snapshot
+    /// (see [`SpendMeter::assess`]).
+    pub fn assess(&self, principal: &str, now_secs: u64) -> Assessment {
+        let state = self
+            .state
+            .lock()
+            .expect("gateway spend-limit lock poisoned");
+        self.meter.assess(&state.limits, principal, now_secs)
     }
 
     /// Owned, so a mutation can move it into the task that commits and replaces.

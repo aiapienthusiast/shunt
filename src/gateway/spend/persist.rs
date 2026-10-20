@@ -296,7 +296,7 @@ fn parse(bytes: &[u8], path: &Path) -> Result<SpendState, LoadIssue> {
     })
 }
 
-fn parse_records<T>(
+pub(crate) fn parse_records<T>(
     values: Vec<serde_json::Value>,
     path: &Path,
     kind: &str,

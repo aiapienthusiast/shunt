@@ -172,14 +172,15 @@ const GATEWAY_PATHS: [(&str, &str); 11] = [
     ("/v1/traces", "POST"),
 ];
 
-/// The two paths whose `MethodRouter` carries a custom
+/// The three paths whose `MethodRouter` carries a custom
 /// `.fallback(api::method_not_allowed)`. That fallback supplies the `405` body
 /// in place of axum's own and sets no header itself
 /// (`src/gateway/spend/api.rs:295`); axum attaches the `Allow` header around it
 /// regardless, which the probe confirms. So these pairs are gated exactly like
 /// the rest.
-const SPEND_PATHS: [(&str, &str); 2] = [
+const SPEND_PATHS: [(&str, &str); 3] = [
     ("/v1/organizations/spend_limits", "GET,HEAD,POST"),
+    ("/v1/organizations/spend_limits/effective", "GET,HEAD"),
     ("/v1/organizations/spend_limits/{id}", "GET,HEAD,DELETE"),
 ];
 
@@ -707,12 +708,12 @@ fn the_source_scan_finds_every_literal_registration() {
     // (`/admin/api/pool` merges its `PATCH` onto the existing `.route(` call,
     // so only the new `/admin/api/pool/{provider}/accounts/{account_ref}` literal
     // adds one) plus the 5 UI routes, 8 gateway (its 3 OTLP paths come from
-    // `Signal::path()`), 2 spend. The UI five are counted unconditionally:
+    // `Signal::path()`), 3 spend. The UI five are counted unconditionally:
     // this scan reads source text, and `#[cfg(feature = "ui")]` does not
     // remove the `.route("…"` literals from it.
     assert_eq!(
-        found, 49,
-        "the literal-path scan found {found} registrations, not 49; either a route was added or \
+        found, 50,
+        "the literal-path scan found {found} registrations, not 50; either a route was added or \
          removed, or `.route(\"…\"` is no longer how they are spelled"
     );
 }
