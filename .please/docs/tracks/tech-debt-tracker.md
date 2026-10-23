@@ -20,6 +20,10 @@
 | TD-015 | codex-spend-caps-20261021 | `cached_tokens` without `input_tokens` is billed twice (the estimate already includes the cached prefix) | Low | 2026-10-21 |
 | TD-016 | codex-spend-caps-20261021 | The refusal log line uses the field name `upstream_status` | Low | 2026-10-21 |
 | TD-017 | codex-spend-caps-20261021 | `src/codex_endpoint.rs` (710 lines) and `src/stream_metrics.rs` (903 lines) exceed the 500-line guideline | Low | 2026-10-21 |
+| TD-018 | anthropic-account-refusal-20261022 | A refusal body that sends part of its bytes and then stalls can hold the response up to 5 s past the caller's idle limit (#825) | Low | 2026-10-23 |
+| TD-019 | anthropic-account-refusal-20261022 | The `judge` doc says a body stalled past the budget is not a refusal, but with an idle clock a zero-byte stall returns the idle error (#825) | Low | 2026-10-23 |
+| TD-020 | anthropic-account-refusal-20261022 | No integration test checks that a stated `You will regain access on … UTC` time becomes the recorded skip or cooldown; only unit tests cover the parsed window (#825) | Low | 2026-10-23 |
+| TD-022 | anthropic-account-refusal-20261022 | Stale "every account refused" comments in `account_refusal.rs` and `upstream_skip.rs`; `account_refusal.rs` (523 lines) and `failover/chain.rs` (566 lines) exceed the 500-line guideline (#825) | Low | 2026-10-23 |
 
 ## Resolved
 
@@ -28,3 +32,4 @@
 | TD-001 | per-window-max-utilization-20261004 | Cap verdict re-checked after selection under a second lock (microsecond race, duplicated selectability rules); verdict now returned from the selection pass | #739 | 2026-10-05 |
 | TD-006 | spend-enforcement-20261003 | Inbound Codex endpoint (`/v1/responses`, WebSocket) not spend-enforced or metered (#733) | #814 | 2026-10-21 |
 | TD-014 | codex-spend-caps-20261021 | `response.refusal.delta` is not counted toward the streaming output floor | #814 | 2026-10-21 |
+| TD-021 | anthropic-account-refusal-20261022 | `classify` did not require the top-level `"type": "error"`, so a third-party body without it advanced the chain (#825) | #825 | 2026-10-23 |
