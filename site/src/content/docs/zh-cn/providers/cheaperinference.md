@@ -68,7 +68,7 @@ export CHEAPER_INFERENCE_API_KEY='...'
 ```bash
 shunt check    # -> config ok
 shunt run
-curl -sS http://127.0.0.1:3001/v1/messages \
+curl -sSi http://127.0.0.1:3001/v1/messages \
   -H 'anthropic-version: 2023-06-01' \
   -H 'content-type: application/json' \
   -d '{"model":"gpt-5.4","max_tokens":16,"messages":[{"role":"user","content":"Reply with OK."}]}'

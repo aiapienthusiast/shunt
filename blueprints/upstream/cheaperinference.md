@@ -23,6 +23,8 @@ provider = "cheaperinference"
 
 When replacing the built-in provider set with `[[upstreams]]`, keep an `anthropic` passthrough upstream unless the operator intentionally changes `server.default_provider`.
 
+Do not add `[[upstreams]]` to a file that already declares the legacy `[providers.*]` table form: `shunt check` rejects a file that mixes the two. In that case, stop and ask the operator whether to migrate the file to `[[upstreams]]` first.
+
 ## Credentials
 
 Export the key in the environment that launches shunt:
